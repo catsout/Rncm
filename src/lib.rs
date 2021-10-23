@@ -1,5 +1,6 @@
 mod tag;
 mod error;
+use error::RncmError;
 
 use std::io;
 use std::io::{Read,Seek,Write,SeekFrom,Cursor};
@@ -14,29 +15,31 @@ use serde::{Serialize, Deserialize};
 
 
 
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
-struct NcmMeta {
-	format: String,
+pub struct NcmMeta {
+	pub format: String,
 	#[serde(rename = "musicId")]
-	music_id: u32,
+	pub music_id: u32,
 	#[serde(rename = "musicName")]
-	music_name: String,
-	artist: Vec<(String, u32)>,
-	album: String,
+	pub music_name: String,
+	pub artist: Vec<(String, u32)>,
+	pub album: String,
 	#[serde(rename = "albumId")]
-	album_id: u32,
+	pub album_id: u32,
 	#[serde(rename = "albumPic")]
-	album_pic: String,
+	pub album_pic: String,
 	// bitrate,duration,alias,mvId
     #[serde(skip)]
-	album_pic_type: String,
+	pub album_pic_type: String,
     #[serde(skip)]
-	album_pic_data: Vec<u8>
+	pub album_pic_data: Vec<u8>
 }
 
 impl From<NcmMeta> for tag::Tag {
     fn from(item: NcmMeta) -> Self {
 		let mut t = tag::Tag::new();
+        t.format = item.format;
 		t.name = item.music_name;
 		t.album = item.album;
 		t.artist = item.artist.into_iter().map(|(n,_)| n).collect();
@@ -46,18 +49,23 @@ impl From<NcmMeta> for tag::Tag {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct Ncm {
+    pub meta: NcmMeta,
+    pub data: Vec<u8>
+}
 
 #[derive(Debug, Default, Clone)]
-struct Ncm {
+struct NcmData {
 	key_stream: Vec<u8>,
 	meta: Vec<u8>,
 	image: Vec<u8>,
 	data: Vec<u8>,
 }
 
-impl Ncm {
-	fn new() -> Ncm {
-		Ncm { ..Default::default() }
+impl NcmData {
+	fn new() -> NcmData {
+		NcmData { ..Default::default() }
 	}
 
 	fn ncm_meta(&self) -> NcmMeta {
@@ -68,7 +76,7 @@ impl Ncm {
 		ncm_meta
 	}
 
-	fn parse(input: &mut (impl Read + Seek)) -> io::Result<Ncm> {
+	fn parse(input: &mut (impl Read + Seek)) -> Result<NcmData, RncmError> {
 		fn read(input: &mut impl Read, len: usize) -> io::Result<Vec<u8>> {
 			let mut data = vec![0u8;len];
 			input.read(&mut data)?;
@@ -77,30 +85,30 @@ impl Ncm {
 		fn read_i32(input: &mut impl Read) -> io::Result<i32> {
 			Ok(input.read_i32::<LittleEndian>()?)
 		}
-		fn parse_key_stream(mut data: Vec<u8>) -> Vec<u8> {
+		fn parse_key_stream(mut data: Vec<u8>) -> Result<Vec<u8>, RncmError> {
 			// neteasecloudmusic....
 			data = xor(data, 0x64).collect();
-			let key = decrypt_aes(&CORE_KEY, &mut data).unwrap()[17..].to_vec();
-			rc4_keystream(&key)
+			let key = decrypt_aes(&CORE_KEY, &mut data)?[17..].to_vec();
+			Ok(rc4_keystream(&key))
 		}
-		fn parse_meta(mut data: Vec<u8>) -> Vec<u8> {
+		fn parse_meta(mut data: Vec<u8>) -> Result<Vec<u8>, RncmError> {
 			data = xor(data, 0x63).collect();
-			data = base64::decode(&data[22..]).unwrap();
-			decrypt_aes(&META_KEY, &mut data).unwrap().to_vec()
+			data = base64::decode(&data[22..])?;
+			Ok(decrypt_aes(&META_KEY, &mut data)?.to_vec())
 		}
 		
-		let mut ncm = Ncm::new();
+		let mut ncm = NcmData::new();
 		read(input, 8)?;
 		input.seek(SeekFrom::Current(2))?;
 
 		ncm.key_stream = {
 			let len = read_i32(input)? as usize;
-			parse_key_stream(read(input, len)?)
+			parse_key_stream(read(input, len)?)?
 		};
 		
 		ncm.meta = {
 			let len = read_i32(input)? as usize;
-			parse_meta(read(input, len)?)
+			parse_meta(read(input, len)?)?
 		};
 		input.seek(SeekFrom::Current(5))?;
 
@@ -152,7 +160,7 @@ where
 	iter1.into_iter().zip(iter2).map(|(x1, x2)| x1^x2)
 }
 
-fn decrypt_aes<'a>(key: &[u8], data: &'a mut [u8]) -> Result<&'a [u8], error::AESDecodeError> {
+fn decrypt_aes<'a>(key: &[u8], data: &'a mut [u8]) -> Result<&'a [u8], error::RncmError> {
 	type Aes128Ecb = Ecb<Aes128, Pkcs7>;
 	let cipher = Aes128Ecb::new_from_slices(key, &[])?;
 	Ok(cipher.decrypt(data)?)
@@ -178,28 +186,32 @@ fn rc4_keystream(key: &[u8]) -> Vec<u8> {
 		.collect()
 }
 
-pub fn parse_file(path: &str) -> Vec<u8> {
-	let mut fin = File::open(path).unwrap();
+pub fn parse_file(path: &str) -> Result<Ncm, RncmError> {
+	let mut fin = File::open(path)?;
 	let mut output = Cursor::new(Vec::new());
-	parse(&mut fin, &mut output).unwrap();
-	output.into_inner()
+	let meta = parse(&mut fin, &mut output)?;
+	Ok(Ncm {
+        meta: meta,
+        data: output.into_inner()
+    })
 }
 
-pub fn parse<R,O>(input: &mut R, output: &mut O) -> Result<String, Box<dyn std::error::Error>> 
+pub fn parse<R,O>(input: &mut R, output: &mut O) -> Result<NcmMeta, RncmError> 
 	where R: Read + Seek,
 		  O: Write,
 {
+    let mut ncm_meta: NcmMeta;
 	// read ncm
 	{
 		let data = {
-			let ncm = Ncm::parse(input).unwrap();	
+	        let ncm = NcmData::parse(input)?;
 			let mut output = Cursor::new(Vec::new());
-			let ncm_meta = ncm.ncm_meta();
-			tag::rewrite_tag(ncm.data, &mut output, ncm_meta.into());
+			ncm_meta = ncm.ncm_meta();
+			tag::rewrite_tag(ncm.data, &mut output, ncm_meta.clone().into())?;
 			output.into_inner()
 		};
 
 		output.write(&data)?;
 	}
-	Ok("".to_string())
+	Ok(ncm_meta)
 }

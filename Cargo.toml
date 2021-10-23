@@ -1,5 +1,5 @@
 [package]
-name = "rncmdump"
+name = "rncm"
 version = "0.1.0"
 authors = ["catsout <outline941@live.com>"]
 edition = "2018"

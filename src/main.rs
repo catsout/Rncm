@@ -5,7 +5,7 @@ use structopt::StructOpt;
 
 
 #[derive(StructOpt, Debug)]
-#[structopt(name = "rncmdump")]
+#[structopt(name = "rncm")]
 struct Opt {
     #[structopt(short = "o", long = "output", parse(from_os_str))]
     output: Option<PathBuf>,
@@ -20,7 +20,7 @@ fn main() {
 		Some(p) => p,
 		None => options.input.clone()
 	};
-	let ncm_output = rncmdump::parse_file(options.input.to_str().unwrap());
-	output.set_extension("flac");	
-	fs::write(output.to_str().unwrap(), ncm_output).unwrap();
+	let ncm_output = rncm::parse_file(options.input.to_str().unwrap()).unwrap();
+	output.set_extension(ncm_output.meta.format);	
+	fs::write(output.to_str().unwrap(), ncm_output.data).unwrap();
 }
